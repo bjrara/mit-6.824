@@ -243,19 +243,20 @@ func (rf *Raft) AppendEntries(args *AppendEntryArgs, reply *AppendEntryReply) {
 			}
 			valid = false
 		}
-		// if term is mismatched, request force sync of the whole term or from the last applied
+
+		// if the term is mismatched, returns with the first index of my term
 		if valid && rf.LogState.Log[args.PrevLogIndex-1].Term != args.PrevLogTerm {
 			//fmt.Printf("%d found inconsistent term %d at index %d\n", rf.me, args.PrevLogTerm, args.PrevLogIndex)
 			term := rf.LogState.Log[args.PrevLogIndex-1].Term
-			firstIndexOfPrevLogTerm := args.PrevLogIndex + 1
-			for j := args.PrevLogIndex - 1; j > rf.message.LastApplied; j-- {
+			index := args.PrevLogIndex + 1
+			for j := args.PrevLogIndex - 1; j > rf.message.LastApplied-1; j-- {
 				if rf.LogState.Log[j].Term == term {
-					firstIndexOfPrevLogTerm--
+					index--
 				} else {
 					break
 				}
 			}
-			reply.PrevLogIndex = firstIndexOfPrevLogTerm
+			reply.PrevLogIndex = index
 			reply.PrevLogTerm = term
 			valid = false
 		}
@@ -504,7 +505,17 @@ func (rf *Raft) appendEntriesToPeer(i int) bool {
 
 		rf.applyChan <- index
 	} else if reply.Term <= term {
-		rf.message.nextIndex[i] = rf.message.nextIndex[i] - 1
+		adjustedNextIndex := rf.message.nextIndex[i] - 1
+		if reply.PrevLogTerm > 0 {
+			adjustedNextIndex = reply.PrevLogIndex + 1
+			if reply.PrevLogTerm != rf.LogState.Log[reply.PrevLogIndex-1].Term {
+				// if term is mismatched, decrement the index and sync again
+				if rf.LogState.Log[reply.PrevLogIndex-1].Term != reply.PrevLogTerm {
+					adjustedNextIndex--
+				}
+			}
+		}
+		rf.message.nextIndex[i] = adjustedNextIndex
 		return false
 	}
 
@@ -535,8 +546,8 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	epsilon := rf.electionTimeout/2 + rand.Int63n(rf.electionTimeout/2)
-	interval := (rf.electionTimeout + epsilon) / 4
+	epsilon := rand.Int63n(rf.electionTimeout / 4)
+	interval := (rf.electionTimeout)/2 + epsilon
 
 	for rf.killed() == false {
 
