@@ -20,7 +20,6 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
-	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -295,7 +294,7 @@ func (rf *Raft) localAppendEntriesLocked(prevLogIndex, term int, newEntries []En
 		rf.LogState.Log = append(rf.LogState.Log, newEntries[i])
 		logIndex++
 	}
-	//fmt.Printf("%d is appending logs from index %d to %d\n", rf.me, prevLogIndex, LogIndex)
+	//fmt.Printf("%d is appending logs from index %d to %d\n", rf.me, prevLogIndex, logIndex)
 	rf.message.LogIndex = logIndex
 }
 
@@ -308,7 +307,9 @@ func (rf *Raft) localApplyEntriesLocked(commitIndex int) {
 
 func (rf *Raft) becomeFollowerLocked(term int, votedFor *int) {
 	rf.state = StateTypeFollower
-	rf.lastHeartBeat = time.Now().UnixMilli()
+	if votedFor != nil {
+		rf.lastHeartBeat = time.Now().UnixMilli()
+	}
 	rf.LogState.CurrentTerm = term
 	rf.LogState.VotedFor = votedFor
 }
@@ -327,15 +328,13 @@ func (rf *Raft) becomeCandidate() (int, bool) {
 	rf.LogState.VotedFor = &rf.me
 	rf.LogState.votes = 1
 
-	//fmt.Printf("%d becomes candidate for term %d\n", rf.me, rf.LogState.CurrentTerm)
-
 	return rf.LogState.CurrentTerm, true
 }
 
 func (rf *Raft) becomeLeader() {
 	rf.mu.Lock()
 	if rf.state == StateTypeCandidate {
-		fmt.Printf("%d becomes leader for term %d\n", rf.me, rf.LogState.CurrentTerm)
+		//fmt.Printf("%d becomes leader for term %d, current index is %d.\n", rf.me, rf.LogState.CurrentTerm, rf.message.LogIndex)
 		for i := 0; i < len(rf.peers); i++ {
 			rf.message.nextIndex[i] = rf.message.LogIndex + 1
 			rf.message.matchIndex[i] = 0
@@ -395,14 +394,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		grantVote = false
 	}
 	if args.Term == rf.LogState.CurrentTerm && rf.LogState.VotedFor != nil && *rf.LogState.VotedFor != args.CandidateId {
-		fmt.Printf("%d rejects vote because the vote has been granted to %d\n", rf.me, *rf.LogState.VotedFor)
+		//fmt.Printf("%d rejects vote because the vote has been granted to %d\n", rf.me, *rf.LogState.VotedFor)
 		grantVote = false
 	}
 
 	if grantVote && rf.message.LogIndex > 0 {
 		lastEntry := rf.LogState.Log[rf.message.LogIndex-1]
 		if args.LastLogTerm < lastEntry.Term || (args.LastLogTerm == lastEntry.Term && args.LastLogIndex < lastEntry.Index) {
-			fmt.Printf("%d rejects vote from %d because my log is more up-to-date.\n", rf.me, args.CandidateId)
+			//fmt.Printf("%d rejects vote from %d because my log is more up-to-date.\n", rf.me, args.CandidateId)
 			grantVote = false
 		}
 	}
@@ -446,11 +445,20 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = rf.message.LogIndex + 1
 	term = rf.LogState.CurrentTerm
 
-	rf.LogState.Log = append(rf.LogState.Log, Entry{
-		Index:   index,
-		Term:    term,
-		Command: command,
-	})
+	if index > len(rf.LogState.Log) {
+		rf.LogState.Log = append(rf.LogState.Log, Entry{
+			Index:   index,
+			Term:    term,
+			Command: command,
+		})
+	} else {
+		rf.LogState.Log[index-1] = Entry{
+			Index:   index,
+			Term:    term,
+			Command: command,
+		}
+	}
+
 	rf.message.LogIndex = index
 	rf.message.matchIndex[rf.me] = index
 	rf.message.nextIndex[rf.me] = index + 1
@@ -514,6 +522,8 @@ func (rf *Raft) appendEntriesToPeer(i int) bool {
 					adjustedNextIndex--
 				}
 			}
+		} else {
+			adjustedNextIndex = 1
 		}
 		rf.message.nextIndex[i] = adjustedNextIndex
 		return false
@@ -546,7 +556,7 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	epsilon := rand.Int63n(rf.electionTimeout / 4)
+	epsilon := rand.Int63n(50)
 	interval := (rf.electionTimeout)/2 + epsilon
 
 	for rf.killed() == false {
@@ -568,7 +578,7 @@ func (rf Raft) isLeaseExpired() bool {
 }
 
 func (rf *Raft) listenStateChange() {
-	for {
+	for rf.killed() == false {
 		select {
 		case <-rf.leaderChan:
 			rf.becomeLeader()
